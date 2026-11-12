@@ -1,0 +1,109 @@
+# ============================================================
+# Official-Area_NginxPostgreSQL - Nginx + PHP + PostgreSQL 16 + SSLH
+# 開發者: ms20250505~jpc
+# 首次開發日期: 2025-12-05
+# 更新日期: 2026-01-29
+# 更新: 新增 SSLH 端口多路復用，58083 同時提供 HTTP + SSH
+# ms2546088筆記-2026-01-29 新增 SSLH 容器支援遠端管理
+# ============================================================
+
+services:
+  # PostgreSQL 16 資料庫 (必須先啟動)
+  postgresql:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    container_name: ${POSTGRES_CONTAINER_NAME:-docker_nginxpg_postgres}
+    network_mode: host
+    environment:
+      - TZ=${TZ:-Asia/Taipei}
+      - POSTGRES_USER=${POSTGRES_USER:-admin958168}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-Admin958168@Secure!}
+      - POSTGRES_DB=${POSTGRES_DB:-appdb}
+      - PGDATA=/var/lib/postgresql/data/pgdata
+      - PGPORT=${POSTGRES_PORT:-55432}
+    volumes:
+      - ${DATA_PATH}/postgresql:/var/lib/postgresql/data
+      - ${CONFIG_PATH}/postgresql/init:/docker-entrypoint-initdb.d:ro
+      - ${LOG_PATH}/postgresql:/var/log/postgresql
+    restart: "no"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin958168} -d ${POSTGRES_DB:-appdb} -p ${POSTGRES_PORT:-55432}"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # PHP-FPM 8.3 with PostgreSQL Support
+  php:
+    image: php:8.3-fpm-alpine
+    container_name: ${CONTAINER_PREFIX:-docker_nginxpg}_php
+    network_mode: host
+    environment:
+      - TZ=${TZ:-Asia/Taipei}
+    volumes:
+      - ${WWW_PATH}:/usr/share/nginx/html
+      - ${CONFIG_PATH}/php/php.ini:/usr/local/etc/php/php.ini:ro
+      - ${CONFIG_PATH}/php/zzz-custom.conf:/usr/local/etc/php-fpm.d/zzz-custom.conf:ro
+      - ${CONFIG_PATH}/nginx/sites:/etc/nginx/conf.d
+      - ${CONFIG_PATH}/nginx/ssl:/etc/nginx/ssl:ro
+      - ${LOG_PATH}/php:/var/log/php
+      - ${BACKUP_PATH:-../Backup-area_NginxPostgreSQL}:/backup
+      - ${PROJECT_PATH:-.}:/project:ro
+    restart: "no"
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    command: >
+      sh -c "apk add --no-cache postgresql-dev && 
+             docker-php-ext-install pdo pdo_pgsql pgsql && php-fpm"
+
+  # Nginx 網頁伺服器
+  # ms2546088筆記-2026-01-29 修改: HTTP 端口改為 58183 (內部端口)
+  nginx:
+    image: ${NGINX_IMAGE:-nginx:alpine}
+    container_name: ${NGINX_CONTAINER_NAME:-docker_nginxpg_nginx}
+    network_mode: host
+    environment:
+      - TZ=${TZ:-Asia/Taipei}
+    volumes:
+      - ${CONFIG_PATH}/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ${CONFIG_PATH}/nginx/sites:/etc/nginx/conf.d:ro
+      - ${CONFIG_PATH}/nginx/ssl:/etc/nginx/ssl:ro
+      - ${WWW_PATH}:/usr/share/nginx/html
+      - ${LOG_PATH}/nginx:/var/log/nginx
+    restart: "no"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:${NGINX_INTERNAL_PORT:-58183}/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      php:
+        condition: service_started
+      postgresql:
+        condition: service_healthy
+
+  # SSLH 端口多路復用 (HTTP + SSH)
+  # ms2546088筆記-2026-01-29 新增
+  sslh:
+    build:
+      context: ${CONFIG_PATH}/sslh
+      dockerfile: Dockerfile
+      args:
+        SSH_ROOT_PASSWORD: ${SSH_ROOT_PASSWORD:-Admin958168@Secure!}
+    image: sslh-nginxpg:1.0
+    container_name: ${CONTAINER_PREFIX:-docker_nginxpg}_sslh
+    network_mode: host
+    environment:
+      - TZ=${TZ:-Asia/Taipei}
+      - SSH_ROOT_PASSWORD=${SSH_ROOT_PASSWORD:-Admin958168@Secure!}
+    restart: "no"
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep sslh && pgrep sshd || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      nginx:
+        condition: service_healthy
